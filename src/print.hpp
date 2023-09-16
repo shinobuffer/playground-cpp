@@ -1,199 +1,284 @@
 #pragma once
 
+#include <iomanip>
 #include <iostream>
 #include <optional>
 #include <sstream>
+#include <string>
+#include <string_view>
 #include <tuple>
 #include <type_traits>
 #include <variant>
-#include <vector>
 
-namespace _details {
-  // 移除给定类型的引用和 const 修饰
-  template <class T>
-  using _rmcvref_t = std::remove_cv_t<std::remove_reference_t<T>>;
+namespace play {
+  namespace _print_details {
+#define DEF_SFINAE_VALUE(x) \
+  template <class T>        \
+  inline constexpr bool x##_v = x<T>::value;
 
-  // 默认实现，直接输出至输出流
-  template <class T, class = void>
-  struct _printer {
-    static void print(std::ostream &os, T const &t) { os << t; }
-    using is_default_print = std::true_type;
-  };
+    // 移除给定类型的引用和 const 修饰
+    template <class T>
+    using _rmcvref_t = std::remove_cv_t<std::remove_reference_t<T>>;
 
-  // 判断给定类型是否可以直接输出至输出流
-  template <class T, class = void>
-  struct _is_default_printable : std::false_type {};
+    template <class T, class = void>
+    struct _if_impl_toString : std::false_type {};
 
-  template <class T>
-  struct _is_default_printable<T, std::void_t<typename _printer<T>::is_default_print,
-                                              decltype(std::declval<std::ostream &>() << std::declval<T const &>())>>
-      : std::true_type {};
+    template <class T>
+    struct _if_impl_toString<T, std::void_t<decltype(std::declval<T const&>().toString())>> : std::true_type {};
+    DEF_SFINAE_VALUE(_if_impl_toString)
 
-  template <class T, class = void>
-  struct _is_printer_printable : std::true_type {};
+    template <class T, class = void>
+    struct _if_impl_stream_insert : std::false_type {};
 
-  template <class T>
-  struct _is_printer_printable<T, std::void_t<typename _printer<T>::is_default_print>> : std::false_type {};
+    template <class T>
+    struct _if_impl_stream_insert<T, std::void_t<decltype(std::declval<std::ostream&>() << std::declval<T const&>())>>
+        : std::true_type {};
+    DEF_SFINAE_VALUE(_if_impl_stream_insert)
 
-  template <class T>
-  struct is_printable : std::disjunction<_is_default_printable<T>, _is_printer_printable<T>> {};
+    template <class T, class = void>
+    struct _is_tuple_like : std::false_type {};
 
-  // 判断给定类型是否为 tuple（如果是则拥有 type 成员，否则拥有 not_type 成员，其他 _enable_if_xxx 模板同理）
-  template <class T, class U = void>
-  struct _enable_if_tuple {
-    using not_type = U;
-  };
+    template <class T>
+    struct _is_tuple_like<T, std::void_t<decltype(std::tuple_size<T>::value)>> : std::true_type {};
+    DEF_SFINAE_VALUE(_is_tuple_like)
 
-  template <class... Ts, class U>
-  struct _enable_if_tuple<std::tuple<Ts...>, U> {
-    using type = U;
-  };
+    template <class T>
+    struct _is_optional : std::false_type {};
 
-  // 判断给定类型是否为 map（通过判断元素类型是否为键类型和值类型组成的 pair）
-  template <class T, class U = void, class = void>
-  struct _enable_if_map {
-    using not_type = U;
-  };
+    template <class T>
+    struct _is_optional<std::optional<T>> : std::true_type {};
+    DEF_SFINAE_VALUE(_is_optional)
 
-  template <class T, class U>
-  struct _enable_if_map<T, U,
-                        std::enable_if_t<std::is_same_v<
-                            typename T::value_type, std::pair<typename T::key_type const, typename T::mapped_type>>>> {
-    using type = U;
-  };
+    template <class T>
+    struct _is_variant : std::false_type {};
 
-  // 判断给定类型是否可迭代（通过 std::begin 尝试获取给定类型的迭代器，并利用 std::iterator_traits
-  // 判断其是否满足迭代器要求）
-  template <class T, class U = void, class = void>
-  struct _enable_if_iterable {
-    using not_type = U;
-  };
+    template <class... Ts>
+    struct _is_variant<std::variant<Ts...>> : std::true_type {};
+    DEF_SFINAE_VALUE(_is_variant)
 
-  template <class T, class U>
-  struct _enable_if_iterable<
-      T, U, std::void_t<typename std::iterator_traits<decltype(std::begin(std::declval<T const &>()))>::value_type>> {
-    using type = U;
-  };
+    template <class T, class = void>
+    struct _is_map : std::false_type {};
 
-  // 判断给定类型是否实现 doPrint 接口
-  template <class T, class U = void, class = void>
-  struct _enable_if_has_print {
-    using not_type = U;
-  };
+    template <class T>
+    struct _is_map<T, std::enable_if_t<std::is_same_v<typename T::value_type,
+                                                      std::pair<typename T::key_type const, typename T::mapped_type>>>>
+        : std::true_type {};
+    DEF_SFINAE_VALUE(_is_map)
 
-  template <class T, class U>
-  struct _enable_if_has_print<
-      T, U, std::void_t<decltype(std::declval<T const &>().doPrint(std::declval<std::ostream &>()))>> {
-    using type = U;
-  };
+    template <class T, class = void>
+    struct _is_iterable : std::false_type {};
 
-  // 判断给定类型是否为字符
-  template <class T>
-  struct _is_char : std::false_type {};
+    template <class T>
+    struct _is_iterable<
+        T, std::void_t<typename std::iterator_traits<decltype(std::begin(std::declval<T const&>()))>::value_type>>
+        : std::true_type {};
+    DEF_SFINAE_VALUE(_is_iterable)
 
-  template <>
-  struct _is_char<char> : std::true_type {};
+    template <class T>
+    struct _is_char : std::false_type {};
 
-  template <>
-  struct _is_char<wchar_t> : std::true_type {};
+    template <>
+    struct _is_char<char> : std::true_type {};
+    DEF_SFINAE_VALUE(_is_char)
 
-  // 判断给定类型是否为字符
-  template <class T, class U = void, class = void>
-  struct _enable_if_char {
-    using not_type = U;
-  };
+    template <class T, class = void>
+    struct _is_string : std::false_type {};
 
-  template <class T, class U>
-  struct _enable_if_char<T, U, std::enable_if_t<_is_char<T>::value>> {
-    using type = U;
-  };
+    template <class T, class Alloc, class Traits>
+    struct _is_string<std::basic_string<T, Alloc, Traits>, std::enable_if_t<_is_char_v<T>>> : std::true_type {};
 
-  // 判断给定类型是否为字符串（string/string_view）
-  template <class T, class U = void, class = void>
-  struct _enable_if_string {
-    using not_type = U;
-  };
+    template <class T, class Traits>
+    struct _is_string<std::basic_string_view<T, Traits>, std::enable_if_t<_is_char_v<T>>> : std::true_type {};
+    DEF_SFINAE_VALUE(_is_string)
 
-  template <class T, class Alloc, class Traits, class U>
-  struct _enable_if_string<std::basic_string<T, Alloc, Traits>, U, typename _enable_if_char<T>::type> {
-    using type = U;
-  };
+    template <class T, class = void>
+    struct _is_c_str : std::false_type {};
 
-  template <class T, class Traits, class U>
-  struct _enable_if_string<std::basic_string_view<T, Traits>, U, typename _enable_if_char<T>::type> {
-    using type = U;
-  };
+    template <class T>
+    struct _is_c_str<T, std::enable_if_t<std::is_pointer_v<std::decay_t<T>> &&
+                                         _is_char_v<std::remove_const_t<std::remove_pointer_t<std::decay_t<T>>>>>>
+        : std::true_type {};
+    DEF_SFINAE_VALUE(_is_c_str)
 
-  // 判断给定类型是否为 C 风格字符串（首先需要是指针，然后判断去除指针、cvr 后的基类型是否为字符）
-  template <class T, class U = void, class = void>
-  struct _enable_if_c_str {
-    using not_type = U;
-  };
+    template <class T>
+    struct _is_str_like : std::disjunction<_is_string<T>, _is_c_str<T>> {};
+    DEF_SFINAE_VALUE(_is_str_like)
 
-  template <class T, class U>
-  struct _enable_if_c_str<
-      T, U,
-      std::enable_if_t<std::is_pointer_v<std::decay_t<T>> &&
-                       _is_char<std::remove_const_t<std::remove_pointer_t<std::decay_t<T>>>>::value>> {
-    using type = U;
-  };
-
-  // 判断给定类型是否为 optional
-  template <class T, class U = void, class = void>
-  struct _enable_if_optional {
-    using not_type = U;
-  };
-
-  template <class T, class U>
-  struct _enable_if_optional<std::optional<T>, U> {
-    using type = U;
-  };
-
-  // 判断给定类型是否为 variant
-  template <class T, class U = void, class = void>
-  struct _enable_if_variant {
-    using not_type = U;
-  };
-
-  template <class... Ts, class U>
-  struct _enable_if_variant<std::variant<Ts...>, U> {
-    using type = U;
-  };
-
-  // 优先：如果对象实现了 doPrint 接口，直接调用
-  template <class T>
-  struct _printer<T, typename _enable_if_has_print<T>::type> {
-    static void print(std::ostream &os, T const &t) { t.doPrint(os); }
-  };
-
-  // 如果是可迭代对象（字符串和 map 除外），对其中的每个元素根据其基类型进行输出
-  template <class T>
-  struct _printer<T, std::void_t<typename _enable_if_has_print<T>::not_type, typename _enable_if_iterable<T>::type,
-                                 typename _enable_if_c_str<T>::not_type, typename _enable_if_string<T>::not_type>> {
-    static void print(std::ostream &os, T const &t) {
-      os << "{";
-      bool flag = false;
-      for (auto const &item : t) {
-        if (flag) {
-          os << ", ";
-        } else {
-          flag = true;
+    // 兜底方案（如果可以的话，优先使用流格式化，否则使用地址替代）
+    template <class T, class = void>
+    struct _serializer {
+      static std::string toString(T const& t) {
+        std::ostringstream oss;
+        if constexpr (_if_impl_stream_insert_v<T>) {
+          oss << t;
+          return oss.str();
         }
-        _printer<_rmcvref_t<decltype(item)>>::print(os, item);
+        oss << std::hex << std::showbase << "addr("
+            << reinterpret_cast<std::size_t>(reinterpret_cast<void const volatile*>(std::addressof(t))) << ")";
+        return oss.str();
       }
-      os << "}";
+    };
+
+    // 如果实现了 toString，直接调用
+    template <class T>
+    struct _serializer<T, std::enable_if_t<_if_impl_toString_v<T>>> {
+      static std::string toString(T const& t) { return t.toString(); }
+    };
+
+    // 可迭代对象（字符串和 map 除外）特化实现
+    template <class T>
+    struct _serializer<
+        T, std::enable_if_t<!_if_impl_toString_v<T> && _is_iterable_v<T> && !_is_str_like_v<T> && !_is_map_v<T>>> {
+      static std::string toString(T const& t) {
+        std::ostringstream oss;
+        oss << "[";
+        bool flag = false;
+        for (auto const& item : t) {
+          if (flag) {
+            oss << ", ";
+          } else {
+            flag = true;
+          }
+          oss << _serializer<_rmcvref_t<decltype(item)>>::toString(item);
+        }
+        oss << "]";
+        return oss.str();
+      }
+    };
+
+    // map 特化实现
+    template <class T>
+    struct _serializer<T, std::enable_if_t<!_if_impl_toString_v<T> && _is_map_v<T>>> {
+      static std::string toString(T const& t) {
+        std::ostringstream oss;
+        oss << "{";
+        bool flag = false;
+        for (auto const& [key, value] : t) {
+          if (flag) {
+            oss << ", ";
+          } else {
+            flag = true;
+          }
+          oss << _serializer<_rmcvref_t<decltype(key)>>::toString(key);
+          oss << ": ";
+          oss << _serializer<_rmcvref_t<decltype(value)>>::toString(value);
+        }
+        oss << "}";
+        return oss.str();
+      }
+    };
+
+    // tuple/pair 特化实现
+    template <class T>
+    struct _serializer<T, std::enable_if_t<!_if_impl_toString_v<T> && _is_tuple_like_v<T>>> {
+      template <std::size_t... Idx>
+      static std::string unroll(T const& t, std::index_sequence<Idx...>) {
+        std::ostringstream oss;
+        oss << "{";
+        ((oss << (Idx == 0 ? "" : ", ")
+              << _serializer<_rmcvref_t<std::tuple_element_t<Idx, T>>>::toString(std::get<Idx>(t))),
+         ...);
+        oss << "}";
+        return oss.str();
+      }
+
+      static std::string toString(T const& t) { return unroll(t, std::make_index_sequence<std::tuple_size_v<T>>{}); }
+    };
+
+    // 字符串特化实现
+    template <class T>
+    struct _serializer<T, std::enable_if_t<!_if_impl_toString_v<T> && _is_str_like_v<T>>> {
+      static std::string toString(T const& t) {
+        std::ostringstream oss;
+        oss << std::quoted(t);
+        return oss.str();
+      }
+    };
+
+    // 字符特化实现
+    template <class T>
+    struct _serializer<T, std::enable_if_t<!_if_impl_toString_v<T> && _is_char_v<T>>> {
+      static std::string toString(T const& t) {
+        std::ostringstream oss;
+        T res[2] = {t, T('\0')};
+        oss << std::quoted(res, '\'');
+        return oss.str();
+      }
+    };
+
+    template <>
+    struct _serializer<bool, void> {
+      static std::string toString(bool v) { return v ? "true" : "false"; };
+    };
+
+    template <>
+    struct _serializer<std::nullptr_t, void> {
+      static std::string toString(std::nullptr_t const&) { return "nullptr"; };
+    };
+
+    template <>
+    struct _serializer<std::nullopt_t, void> {
+      static std::string toString(std::nullopt_t const&) { return "nullopt"; };
+    };
+
+    // optional 特化实现
+    template <class T>
+    struct _serializer<T, std::enable_if_t<!_if_impl_toString_v<T> && _is_optional_v<T>>> {
+      static std::string toString(T const& t) {
+        if (t) {
+          return "opt(" + _serializer<typename T::value_type>::toString(*t) + ")";
+        }
+        return _serializer<std::nullopt_t>::toString(std::nullopt);
+      }
+    };
+
+    // variant 特化实现
+    template <class T>
+    struct _serializer<T, std::enable_if_t<!_if_impl_toString_v<T> && _is_variant_v<T>>> {
+      static std::string toString(T const& t) {
+        std::string inner = std::visit(
+            [](auto const& v) -> std::string { return _serializer<_rmcvref_t<decltype(v)>>::toString(v); }, t);
+        return "var(" + inner + ")";
+      }
+    };
+
+    template <class T, class... Ts>
+    std::string toString(T const& t, Ts const&... ts) {
+      std::string res = _serializer<_rmcvref_t<T>>::toString(t);
+      ((res += " ", res.append(_serializer<_rmcvref_t<Ts>>::toString(ts))), ...);
+      return res;
     }
-  };
 
-  template <class T, class... Ts>
-  void fprint(std::ostream &os, T const &t, Ts const &...ts) {
-    // 提取基类型，根据基类型转发到不同实现上
-    _printer<_rmcvref_t<T>>::print(os, t);
-    ((os << ' ', _printer<_rmcvref_t<Ts>>::print(os, ts)), ...);
-    os << '\n';
-  }
+    // 将内容输出至指定流
+    template <class T, class... Ts>
+    void oprint(std::ostream& os, T const& t, Ts const&... ts) {
+      os << toString(t, ts...);
+    }
 
-} // namespace _details
+    // 将内容输出至指定流（自带换行）
+    template <class T, class... Ts>
+    void oprintln(std::ostream& os, T const& t, Ts const&... ts) {
+      os << toString(t, ts...).append("\n");
+    }
 
-using ::_details::fprint;
-using ::_details::is_printable;
+    // 将内容输出至标准输出流
+    template <class T, class... Ts>
+    void print(T const& t, Ts const&... ts) {
+      oprint(std::cout, t, ts...);
+    }
+
+    // 将内容输出至标准输出流（自带换行）
+    template <class T, class... Ts>
+    void println(T const& t, Ts const&... ts) {
+      oprintln(std::cout, t, ts...);
+    }
+
+  } // namespace _print_details
+
+  using _print_details::oprint;
+  using _print_details::oprintln;
+  using _print_details::print;
+  using _print_details::println;
+  using _print_details::toString;
+
+} // namespace play
