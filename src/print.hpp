@@ -12,6 +12,7 @@
 
 namespace play {
   namespace _print_details {
+
 #define DEF_SFINAE_VALUE(x) \
   template <class T>        \
   inline constexpr bool x##_v = x<T>::value;
@@ -125,10 +126,13 @@ namespace play {
       static std::string toString(T const& t) { return t.toString(); }
     };
 
-    // 可迭代对象（字符串和 map 除外）特化实现
+    // 可迭代对象（字符串、map、以及递归类型除外）特化实现
     template <class T>
-    struct _serializer<
-        T, std::enable_if_t<!_if_impl_toString_v<T> && _is_iterable_v<T> && !_is_str_like_v<T> && !_is_map_v<T>>> {
+    struct _serializer<T, std::enable_if_t<!_if_impl_toString_v<T> && _is_iterable_v<T> &&
+                                           !std::is_same_v<typename std::iterator_traits<decltype(std::begin(
+                                                               std::declval<T const&>()))>::value_type,
+                                                           std::decay_t<T>> &&
+                                           !_is_str_like_v<T> && !_is_map_v<T>>> {
       static std::string toString(T const& t) {
         std::ostringstream oss;
         oss << "[";
