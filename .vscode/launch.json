@@ -5,9 +5,18 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "debug",
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug-lldb",
+      "program": "${workspaceFolder}/build/main",
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "Build"
+    },
+    {
       "type": "cppdbg",
       "request": "launch",
+      "name": "Debug-gdb",
       "program": "${workspaceFolder}/build/main",
       "args": [],
       "stopAtEntry": false,
