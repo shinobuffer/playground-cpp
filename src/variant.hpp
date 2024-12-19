@@ -155,26 +155,52 @@ struct MultiArray<Ret (*)(Visitor, Vs...), first, rest...> {
 template <typename ArrayType, typename IdxSeq>
 struct gen_vtable_impl;
 
-// TODO
+// Base case
 template <typename Ret, typename Visitor, typename... Vs, size_t... indices>
 struct gen_vtable_impl<MultiArray<Ret (*)(Visitor, Vs...)>, std::index_sequence<indices...>> {
   using ArrayType = MultiArray<Ret (*)(Visitor, Vs...)>;
+
+  template <size_t index, typename V>
+  static constexpr decltype(auto) elementByIndexOrCooke(V&& var) noexcept {
+    if constexpr (index != variant_npos) {
+    } else {
+    }
+  }
 };
 
+// Recursion case
 template <typename Ret, typename Visitor, typename... Vs, size_t... dimensions, size_t... indices>
 struct gen_vtable_impl<MultiArray<Ret (*)(Visitor, Vs...), dimensions...>, std::index_sequence<indices...>> {
   using ArrayType = MultiArray<Ret (*)(Visitor, Vs...), dimensions...>;
   using NextV = std::remove_reference<nth_type_t<sizeof...(indices), Vs...>>;
 
   template <bool do_cookie, size_t index, typename T>
-  static constexpr void applySingleAlt(T& element, T* cookie_element = nullptr) {}
+  static constexpr void applySingleAlt(T& element, T* cookie_element = nullptr) {
+    if constexpr (do_cookie) {
+      element = gen_vtable_impl<T, std::index_sequence<indices..., index>>::apply();
+      *cookie_element = gen_vtable_impl<T, std::index_sequence<indices..., variant_npos>>::apply();
+    } else {
+      auto tmp_element =
+          gen_vtable_impl<std::remove_reference_t<decltype(element)>, std::index_sequence<indices..., index>>::apply();
+      static_assert(std::is_same_v<T, decltype(tmp_element)>,
+                    "std::visit requires the visitor to have the same "
+                    "return type for all alternatives of a variant");
+      element = tmp_element;
+    }
+  }
 
   template <size_t... v_indices>
-  static constexpr void applyAllAlts(ArrayType& vtable, std::index_sequence<v_indices...>) {}
+  static constexpr void applyAllAlts(ArrayType& vtable, std::index_sequence<v_indices...>) {
+    if constexpr (extra_visit_slot_needed<Ret, NextV>) {
+      (applySingleAlt<true, v_indices>(vtable.m_arr[v_indices + 1], &vtable.m_arr[0]), ...);
+    } else {
+      (applySingleAlt<false, v_indices>(vtable.m_arr[v_indices]), ...);
+    }
+  }
 
   static constexpr ArrayType apply() {
     ArrayType vtable{};
-    applyAllAlts(vtable, std::make_index_sequence<variant_size_v<NextV>>);
+    applyAllAlts(vtable, std::make_index_sequence<variant_size_v<NextV>>());
     return vtable;
   }
 };
@@ -375,10 +401,12 @@ struct VariantBase : MoveAssignBaseAlias<Ts...> {
   VariantBase& operator=(VariantBase&&) = default;
 };
 
-template <typename... Ts>
-class Variant : private EnableCopyMove<traits<Ts...>::is_copy_ctor, traits<Ts...>::is_copy_assign,
-                                       traits<Ts...>::is_move_ctor, traits<Ts...>::is_move_assign, Variant<Ts...>> {};
-
 } // namespace _variant_detail
+
+template <typename... Ts>
+class Variant : private EnableCopyMove<_variant_detail::traits<Ts...>::is_copy_ctor,
+                                       _variant_detail::traits<Ts...>::is_copy_assign,
+                                       _variant_detail::traits<Ts...>::is_move_ctor,
+                                       _variant_detail::traits<Ts...>::is_move_assign, Variant<Ts...>> {};
 
 } // namespace play
