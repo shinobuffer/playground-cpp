@@ -81,7 +81,27 @@ struct traits {
   static constexpr bool is_nothrow_move_assign = (std::is_nothrow_move_assignable_v<Ts> && ...);
 };
 
-// Suitably-small, trivially copyable types can always be placed in a variant without it becoming valueless
+template <size_t I, typename Union>
+constexpr decltype(auto) getN(Union&& u) noexcept {
+  if constexpr (I == 0) {
+    return std::forward<Union>(u).m_first.get();
+  }
+  if constexpr (I == 1) {
+    return std::forward<Union>(u).m_rest.m_first.get();
+  }
+  if constexpr (I == 2) {
+    return std::forward<Union>(u).m_rest.m_rest.m_first.get();
+  } else {
+    return getN<I - 3>(std::forward<Union>(u).m_rest.m_rest.m_rest);
+  }
+}
+
+template <size_t I, typename V>
+constexpr decltype(auto) get(V&& var) noexcept {
+  return getN<I>(std::forward<V>(var).m_union);
+}
+
+// Suitably-small, trivially copyable types can always be placed in a variant without it becoming valueless.
 template <typename T>
 using never_valueless_alt = std::conjunction<std::bool_constant<sizeof(T) <= 256>, std::is_trivially_copyable<T>>;
 
@@ -97,10 +117,12 @@ inline constexpr bool extra_visit_slot_needed<variant_cookie, V, Variant<Ts...>>
 template <typename V, typename... Ts>
 inline constexpr bool extra_visit_slot_needed<variant_idx_cookie, V, Variant<Ts...>> = !never_valueless<Ts...>::value;
 
-// Param dimensions are the number of alternatives of each variant in sequence
+// Param dimensions are the number of alternatives of each variant in sequence.
 template <typename Lambda, size_t... dimensions>
 struct MultiArray;
 
+// Base case.
+// The only one data member m_data store the address of a function.
 template <typename Lambda>
 struct MultiArray<Lambda> {
   template <typename>
@@ -130,13 +152,14 @@ struct MultiArray<Lambda> {
 
   using ElementType = typename untag_result<Lambda>::type;
 
-  constexpr const ElementType& access() const { return m_data; }
+  using result_is_deduced = untag_result<Lambda>;
 
-  static constexpr bool result_is_deduced = untag_result<Lambda>::value;
+  constexpr const ElementType& access() const { return m_data; }
 
   ElementType m_data;
 };
 
+// Recursion case.
 template <typename Ret, typename Visitor, typename... Vs, size_t first, size_t... rest>
 struct MultiArray<Ret (*)(Visitor, Vs...), first, rest...> {
   using V = nth_type_t<sizeof...(Vs) - sizeof...(rest) - 1, Vs...>;
@@ -155,26 +178,91 @@ struct MultiArray<Ret (*)(Visitor, Vs...), first, rest...> {
 template <typename ArrayType, typename IdxSeq>
 struct gen_vtable_impl;
 
-// TODO
+// Base case.
+// It populates a MultiArray element with the address of a function
+// that invokes the visitor with the alternatives specified by indices.
 template <typename Ret, typename Visitor, typename... Vs, size_t... indices>
 struct gen_vtable_impl<MultiArray<Ret (*)(Visitor, Vs...)>, std::index_sequence<indices...>> {
   using ArrayType = MultiArray<Ret (*)(Visitor, Vs...)>;
+
+  template <size_t index, typename V>
+  static constexpr decltype(auto) elementByIndexOrCookie(V&& var) noexcept {
+    if constexpr (index != variant_npos) {
+      return get<index>(std::forward<V>(var));
+    } else {
+      return variant_cookie{};
+    }
+  }
+
+  static constexpr decltype(auto) visitInvoke(Visitor&& visitor, Vs... vars) {
+    if constexpr (std::is_same_v<Ret, variant_idx_cookie>) {
+      // For raw visitation using indices, pass the indices to the visitor and discard the return value
+      std::invoke(std::forward<Visitor>(visitor), elementByIndexOrCookie<indices>(std::forward<Vs>(vars))...,
+                  std::integral_constant<size_t, indices>()...);
+    } else if constexpr (std::is_same_v<Ret, variant_cookie>) {
+      // For raw visitation without indices, and discard the return value
+      std::invoke(std::forward<Visitor>(visitor), elementByIndexOrCookie<indices>(std::forward<Vs>(vars))...);
+    } else if constexpr (ArrayType::result_is_deduced::value) {
+      // For usual case
+      return std::invoke(std::forward<Visitor>(visitor), elementByIndexOrCookie<indices>(std::forward<Vs>(vars))...);
+    } else {
+      // For visit<R>
+      return std::invoke(std::forward<Visitor>(visitor), get<indices>(std::forward<Vs>(vars))...);
+    }
+  }
+
+  static constexpr auto apply() {
+    if constexpr (ArrayType::result_is_deduced::value) {
+      constexpr bool visit_ret_type_mismatch =
+          !std::is_same_v<typename Ret::type, decltype(visitInvoke(std::declval<Visitor>(), std::declval<Vs>()...))>;
+      if constexpr (visit_ret_type_mismatch) {
+        struct cannot_match {};
+        return cannot_match{};
+      } else {
+        return ArrayType{&visitInvoke};
+      }
+    } else {
+      return ArrayType{&visitInvoke};
+    }
+  }
 };
 
+// Recursion case.
+// It builds up the index sequences by recursively
+// calling apply() on the next specialization of gen_vtable_impl.
+// The base case of the recursion defines the actual function pointers.
 template <typename Ret, typename Visitor, typename... Vs, size_t... dimensions, size_t... indices>
 struct gen_vtable_impl<MultiArray<Ret (*)(Visitor, Vs...), dimensions...>, std::index_sequence<indices...>> {
   using ArrayType = MultiArray<Ret (*)(Visitor, Vs...), dimensions...>;
   using NextV = std::remove_reference<nth_type_t<sizeof...(indices), Vs...>>;
 
   template <bool do_cookie, size_t index, typename T>
-  static constexpr void applySingleAlt(T& element, T* cookie_element = nullptr) {}
+  static constexpr void applySingleAlt(T& element, T* cookie_element = nullptr) {
+    if constexpr (do_cookie) {
+      element = gen_vtable_impl<T, std::index_sequence<indices..., index>>::apply();
+      *cookie_element = gen_vtable_impl<T, std::index_sequence<indices..., variant_npos>>::apply();
+    } else {
+      auto tmp_element =
+          gen_vtable_impl<std::remove_reference_t<decltype(element)>, std::index_sequence<indices..., index>>::apply();
+      static_assert(std::is_same_v<T, decltype(tmp_element)>,
+                    "std::visit requires the visitor to have the same "
+                    "return type for all alternatives of a variant");
+      element = tmp_element;
+    }
+  }
 
   template <size_t... v_indices>
-  static constexpr void applyAllAlts(ArrayType& vtable, std::index_sequence<v_indices...>) {}
+  static constexpr void applyAllAlts(ArrayType& vtable, std::index_sequence<v_indices...>) {
+    if constexpr (extra_visit_slot_needed<Ret, NextV>) {
+      (applySingleAlt<true, v_indices>(vtable.m_arr[v_indices + 1], &(vtable.m_arr[0])), ...);
+    } else {
+      (applySingleAlt<false, v_indices>(vtable.m_arr[v_indices]), ...);
+    }
+  }
 
   static constexpr ArrayType apply() {
     ArrayType vtable{};
-    applyAllAlts(vtable, std::make_index_sequence<variant_size_v<NextV>>);
+    applyAllAlts(vtable, std::make_index_sequence<variant_size_v<NextV>>());
     return vtable;
   }
 };
@@ -192,11 +280,14 @@ constexpr decltype(auto) doVisit(Visitor&& visitor, Vs&&... variants) {
   if constexpr (sizeof...(Vs) == 0) {
     if constexpr (std::is_void_v<Ret>) {
       return (void)std::forward<Visitor>(visitor)();
+    } else {
+      return std::forward<Visitor>(visitor)();
     }
-    return std::forward<Visitor>(visitor)();
+  } else {
+    using V0 = nth_type_t<0, Vs...>;
+    // too many variants or too many alternatives of the first variant, using a jump table to generate case
+    // TODO
   }
-  using V0 = nth_type_t<0, Vs...>;
-  // too many variants or too many alternatives of the first variant, using a jump table to generate case
 }
 
 template <typename T, bool = std::is_trivially_destructible_v<T>>
@@ -232,6 +323,8 @@ struct Uninitialized<T, false> {
 
 // Inheritance chain:
 // VariantStorage(VariantUnion) -> CopyCtorBase -> MoveCtorBase -> CopyAssignBase -> MoveAssignBase -> Variant
+
+// To get the value in union, use get<I>(u)
 template <bool trivially_dtor, typename... Ts>
 union VariadicUnion {
   VariadicUnion() = default;
@@ -261,6 +354,7 @@ struct VariantStorage {
   // In fact using a smaller unsigned integer type instead of size_t could save more space.
   // In std, they choose to use unsigned char/short base on the size of the parameter pack.
   using IndexType = size_t;
+  // TODO
 };
 
 template <typename... Ts>
@@ -317,7 +411,8 @@ struct CopyAssignBase : MoveCtorBaseAlias<Ts...> {
   using BaseT = MoveCtorBaseAlias<Ts...>;
   using BaseT::BaseT;
 
-  // If not all alternatives are trivially copy assignable, need to manually invoke copy opeartion
+  // If not all alternatives are trivially copy assignable, need to manually invoke copy opeartion.
+  // Other smfs need to be handled in similar way
   CopyAssignBase& operator=(const CopyAssignBase&) noexcept(traits<Ts...>::is_nothrow_copy_assign) {
     // TODO
   };
@@ -375,10 +470,16 @@ struct VariantBase : MoveAssignBaseAlias<Ts...> {
   VariantBase& operator=(VariantBase&&) = default;
 };
 
-template <typename... Ts>
-class Variant : private EnableCopyMove<traits<Ts...>::is_copy_ctor, traits<Ts...>::is_copy_assign,
-                                       traits<Ts...>::is_move_ctor, traits<Ts...>::is_move_assign, Variant<Ts...>> {};
-
 } // namespace _variant_detail
+
+template <typename... Ts>
+class Variant : private EnableCopyMove<_variant_detail::traits<Ts...>::is_copy_ctor,
+                                       _variant_detail::traits<Ts...>::is_copy_assign,
+                                       _variant_detail::traits<Ts...>::is_move_ctor,
+                                       _variant_detail::traits<Ts...>::is_move_assign, Variant<Ts...>> {
+private:
+  template <size_t I, typename V>
+  friend constexpr decltype(auto) _variant_detail::get(V&& var) noexcept;
+};
 
 } // namespace play
