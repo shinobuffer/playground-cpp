@@ -275,7 +275,7 @@ struct gen_vtable {
 };
 
 template <typename Ret, typename Visitor, typename... Vs>
-constexpr decltype(auto) doVisit(Visitor&& visitor, Vs&&... variants) {
+constexpr decltype(auto) doVisit(Visitor&& visitor, Vs&&... vars) {
   // early return for case of visiting no variants
   if constexpr (sizeof...(Vs) == 0) {
     if constexpr (std::is_void_v<Ret>) {
@@ -285,8 +285,54 @@ constexpr decltype(auto) doVisit(Visitor&& visitor, Vs&&... variants) {
     }
   } else {
     using V0 = nth_type_t<0, Vs...>;
-    // too many variants or too many alternatives of the first variant, using a jump table to generate case
-    // TODO
+    using ArrayType = MultiArray<Ret (*)(Visitor&&, V0&&)>;
+
+    constexpr size_t v0_size = variant_size_v<V0>;
+
+    if constexpr (sizeof...(Vs) == 1 && v0_size <= 11) {
+      V0& v0 = [](V0& v, ...) -> V0& { return v; }(vars...);
+
+#define VISIT_UNREACHABLE __builtin_unreachable
+#define VISIT_CASE(N)                                                                                        \
+  case N: {                                                                                                  \
+    if constexpr (N < v0_size) {                                                                             \
+      return gen_vtable_impl<ArrayType, std::index_sequence<N>>::visitInvoke(std::forward<Visitor>(visitor), \
+                                                                             std::forward<V0>(v0));          \
+    } else {                                                                                                 \
+      VISIT_UNREACHABLE();                                                                                   \
+    }                                                                                                        \
+  }
+
+      switch (v0.index()) {
+        VISIT_CASE(0)
+        VISIT_CASE(1)
+        VISIT_CASE(2)
+        VISIT_CASE(3)
+        VISIT_CASE(4)
+        VISIT_CASE(5)
+        VISIT_CASE(6)
+        VISIT_CASE(7)
+        VISIT_CASE(8)
+        VISIT_CASE(9)
+        VISIT_CASE(10)
+        case variant_npos:
+          if constexpr (std::is_same_v<Ret, variant_cookie> || std::is_same_v<Ret, variant_idx_cookie>) {
+            return gen_vtable_impl<ArrayType, std::index_sequence<variant_npos>>::visitInvoke(
+                std::forward<Visitor>(visitor), std::forward<V0>(v0));
+          } else {
+            VISIT_UNREACHABLE();
+          }
+        default:
+          VISIT_UNREACHABLE();
+      }
+#undef VISIT_UNREACHABLE
+#undef VISIT_CASE
+    } else {
+      // too many variants or too many alternatives of the first variant, using a jump table to generate case
+      constexpr auto& vtable = gen_vtable<Ret, Visitor&&, Vs&&...>::vtable;
+      auto func_ptr = vtable.access(vars.index()...);
+      return (*func_ptr)(std::forward<Visitor>(visitor), std::forward<Vs>(vars)...);
+    }
   }
 }
 
